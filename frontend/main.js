@@ -1,4 +1,4 @@
-// week08/frontend/main.js
+﻿// week08/frontend/main.js
 
 document.addEventListener('DOMContentLoaded', () => {
     // API endpoints for the Product and Order services.
