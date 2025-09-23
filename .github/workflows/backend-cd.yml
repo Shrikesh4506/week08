@@ -1,4 +1,4 @@
-name: CD - Deploy Backend Services to AKS
+﻿name: CD - Deploy Backend Services to AKS
 
 on:
   workflow_dispatch:
@@ -41,7 +41,7 @@ jobs:
 
       - name: Attach ACR
         run: |
-          az aks update --name ${{ github.event.inputs.aks_cluster_name }} --resource-group ${{ github.event.inputs.aks_resource_group }} --attach-acr ${{ github.event.inputs.aks_acr_name }}
+          az aks update --name ${{ github.event.inputs.aks_cluster_name }} --resource-group ${{ github.event.inputs.aks_resource_group }} --attach-acr ${{ github.event.inputs.aks_acr_name }} || echo "attach-acr skipped (already attached or insufficient perms)"
 
       - name: Deploy Backend Infrastructure (Namespace, ConfigMaps, Secrets, Databases)
         run: |
