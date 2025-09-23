@@ -9,22 +9,24 @@ on:
       aks_resource_group:
         description: Resource Group of the AKS Cluster
         required: true
-      aks_acr_name:
-        description: ACR name (kept for compatibility)
-        required: false
-        default: ""
 
 jobs:
   deploy_backend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true
+      - name: Azure CLI login (service principal)
+        env:
+          AZURE_CLIENT_ID:        ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET:    ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID:        ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID:  ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euxo pipefail
+          az cloud set -n azurecloud
+          az login --service-principal -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID"
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
 
       - name: Set Kubernetes context (get AKS credentials)
         run: |
@@ -34,19 +36,23 @@ jobs:
             --overwrite-existing
 
       - name: Ensure namespace and image pull secret
-        shell: bash
+        env:
+          REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          REGISTRY_USERNAME:     ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD:     ${{ secrets.REGISTRY_PASSWORD }}
         run: |
-          set -e
+          set -euxo pipefail
           kubectl create namespace sit722-w08 --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret docker-registry acr-pull \
-            --docker-server=${{ secrets.REGISTRY_LOGIN_SERVER }} \
-            --docker-username=${{ secrets.REGISTRY_USERNAME }} \
-            --docker-password=${{ secrets.REGISTRY_PASSWORD }} \
+            --docker-server="$REGISTRY_LOGIN_SERVER" \
+            --docker-username="$REGISTRY_USERNAME" \
+            --docker-password="$REGISTRY_PASSWORD" \
             -n sit722-w08 --dry-run=client -o yaml | kubectl apply -f -
-          kubectl patch sa default -n sit722-w08 -p '{"imagePullSecrets":[{"name":"acr-pull"}]}' || true
+          kubectl patch sa default -n sit722-w08 --type merge -p '{"imagePullSecrets":[{"name":"acr-pull"}]}' || true
 
-      - name: Deploy backend services (product/order)
-        shell: bash
+      - name: Deploy backend services (product & order)
+        env:
+          REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
         run: |
           cat <<'YAML' | kubectl apply -f -
           apiVersion: apps/v1
@@ -60,7 +66,7 @@ jobs:
               spec:
                 containers:
                 - name: product
-                  image: ${{ secrets.REGISTRY_LOGIN_SERVER }}/product_service:latest
+                  image: ${REGISTRY_LOGIN_SERVER}/product_service:latest
                   imagePullPolicy: Always
                   ports: [{ containerPort: 8000 }]
           ---
@@ -83,7 +89,7 @@ jobs:
               spec:
                 containers:
                 - name: order
-                  image: ${{ secrets.REGISTRY_LOGIN_SERVER }}/order_service:latest
+                  image: ${REGISTRY_LOGIN_SERVER}/order_service:latest
                   imagePullPolicy: Always
                   ports: [{ containerPort: 8002 }]
           ---
