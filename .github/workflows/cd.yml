@@ -1,4 +1,5 @@
 ﻿name: CD - Deploy to AKS
+
 on:
   workflow_run:
     workflows: [ "CI - Build & Test" ]
@@ -24,17 +25,22 @@ env:
 
 jobs:
   deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Gate CD behind repo variable AND require CI success
+    # Turn on later by setting: Settings → Variables → ENABLE_CD = true
+    if: ${{ vars.ENABLE_CD == 'true' && github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment: production
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
           client-id:       ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Set kubectl context
         uses: azure/aks-set-context@v4
         with:
@@ -42,7 +48,8 @@ jobs:
           cluster-name:   ${{ env.AKS_CLUSTER_NAME }}
 
       - name: Ensure namespace + ACR pull secret
-        env: { NS: ${{ env.K8S_NAMESPACE }} }
+        env:
+          NS: ${{ env.K8S_NAMESPACE }}
         run: |
           kubectl get ns "$NS" || kubectl create ns "$NS"
           kubectl delete secret acr-cred -n "$NS" --ignore-not-found
@@ -56,11 +63,12 @@ jobs:
         id: tags
         run: |
           echo "product_ref=${{ env.REGISTRY_LOGIN_SERVER }}/${{ env.BACKEND_IMAGE_NAME_PRODUCT }}:latest" >> $GITHUB_OUTPUT
-          echo "order_ref=${{ env.REGISTRY_LOGIN_SERVER }}/${{ env.BACKEND_IMAGE_NAME_ORDER }}:latest"       >> $GITHUB_OUTPUT
-          echo "frontend_ref=${{ env.REGISTRY_LOGIN_SERVER }}/${{ env.FRONTEND_IMAGE_NAME }}:latest"          >> $GITHUB_OUTPUT
+          echo "order_ref=${{ env.REGISTRY_LOGIN_SERVER }}/${{ env.BACKEND_IMAGE_NAME_ORDER }}:latest"     >> $GITHUB_OUTPUT
+          echo "frontend_ref=${{ env.REGISTRY_LOGIN_SERVER }}/${{ env.FRONTEND_IMAGE_NAME }}:latest"        >> $GITHUB_OUTPUT
 
       - name: Apply backend manifests
-        env: { NS: ${{ env.K8S_NAMESPACE }} }
+        env:
+          NS: ${{ env.K8S_NAMESPACE }}
         run: |
           kubectl apply -f k8s/backend/product-deployment.yaml -n "$NS"
           kubectl apply -f k8s/backend/order-deployment.yaml   -n "$NS"
@@ -70,19 +78,22 @@ jobs:
           kubectl rollout status deploy/order-service   -n "$NS" --timeout=180s
 
       - name: Publish BACKEND_BASE_URL (optional)
-        env: { NS: ${{ env.K8S_NAMESPACE }} }
+        env:
+          NS: ${{ env.K8S_NAMESPACE }}
         run: |
           kubectl create configmap frontend-env \
             --from-literal=BACKEND_BASE_URL=${{ secrets.BACKEND_BASE_URL }} \
             -n "$NS" --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Apply frontend manifest
-        env: { NS: ${{ env.K8S_NAMESPACE }} }
+        env:
+          NS: ${{ env.K8S_NAMESPACE }}
         run: |
           kubectl apply -f k8s/frontend/deployment.yaml -n "$NS"
           kubectl set image deploy/frontend frontend=${{ steps.tags.outputs.frontend_ref }} -n "$NS"
           kubectl rollout status deploy/frontend -n "$NS" --timeout=180s
 
       - name: Show services
-        env: { NS: ${{ env.K8S_NAMESPACE }} }
+        env:
+          NS: ${{ env.K8S_NAMESPACE }}
         run: kubectl get svc -n "$NS" -o wide

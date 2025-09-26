@@ -53,6 +53,6 @@ jobs:
       test_command: "npm ci && npm run build && npm test --if-present"
       push_image: true
     secrets:
-      REGISTRY_USERNAME:     ${{ secrets.ACR_USERNAME }}
-      REGISTRY_PASSWORD:     ${{ secrets.ACR_PASSWORD }}
-      REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+      REGISTRY_LOGIN_SERVER: ghcr.io
+      REGISTRY_USERNAME: ${{ github.actor }}
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
