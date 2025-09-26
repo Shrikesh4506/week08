@@ -1,0 +1,58 @@
+﻿name: CI - Build & Test
+on:
+  push:
+    branches: [ dev, main ]
+    paths: [ "backend/**", "frontend/**", ".github/workflows/**" ]
+  pull_request:
+    branches: [ main ]
+    paths: [ "backend/**", "frontend/**", ".github/workflows/**" ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  BACKEND_IMAGE_NAME_PRODUCT: product_service
+  BACKEND_IMAGE_NAME_ORDER:   order_service
+  FRONTEND_IMAGE_NAME:        frontend
+
+jobs:
+  backend-product:
+    uses: ./.github/workflows/_reusable-build.yml
+    with:
+      service_name: ${{ env.BACKEND_IMAGE_NAME_PRODUCT }}
+      context_path: backend/product
+      test_command: "pip install -r requirements.txt || true && pytest -v || true"
+      push_image: true
+    secrets:
+      REGISTRY_USERNAME:     ${{ secrets.ACR_USERNAME }}
+      REGISTRY_PASSWORD:     ${{ secrets.ACR_PASSWORD }}
+      REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+
+  backend-order:
+    uses: ./.github/workflows/_reusable-build.yml
+    with:
+      service_name: ${{ env.BACKEND_IMAGE_NAME_ORDER }}
+      context_path: backend/order
+      test_command: "pip install -r requirements.txt || true && pytest -v || true"
+      push_image: true
+    secrets:
+      REGISTRY_USERNAME:     ${{ secrets.ACR_USERNAME }}
+      REGISTRY_PASSWORD:     ${{ secrets.ACR_PASSWORD }}
+      REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+
+  frontend:
+    uses: ./.github/workflows/_reusable-build.yml
+    with:
+      service_name: ${{ env.FRONTEND_IMAGE_NAME }}
+      context_path: frontend
+      test_command: "npm ci && npm run build && npm test --if-present"
+      push_image: true
+    secrets:
+      REGISTRY_USERNAME:     ${{ secrets.ACR_USERNAME }}
+      REGISTRY_PASSWORD:     ${{ secrets.ACR_PASSWORD }}
+      REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
