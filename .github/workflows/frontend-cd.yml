@@ -1,0 +1,182 @@
+﻿name: CD - Deploy Frontend to AKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_api_ip:
+        description: 'External IP of Product Service (e.g., http://X.X.X.X:8000)'
+        required: true
+        default: 'http://<ip_address>:8000'
+      order_api_ip:
+        description: 'External IP of Order Service (e.g., http://Y.Y.Y.Y:8002)'  # Fixed to 8002
+        required: true
+        default: 'http://<ip_address>:8002'
+      aks_cluster_name:
+        description: 'Name of the AKS Cluster to deploy to'
+        required: true
+        default: '<aks_name>'
+      aks_resource_group:
+        description: 'Resource Group of the AKS Cluster'
+        required: true
+        default: '<resource_group_name>'
+      namespace:
+        description: 'Kubernetes Namespace'
+        required: false
+        default: 'sit722-w08'
+      image_tag:
+        description: 'Image Tag (defaults to latest Git-based tag)'
+        required: false
+        default: ''
+
+  workflow_call:
+    inputs:
+      product_api_ip:
+        required: true
+        type: string
+      order_api_ip:
+        required: true
+        type: string
+      aks_cluster_name:
+        required: true
+        type: string
+      aks_resource_group:
+        required: true
+        type: string
+      namespace:
+        required: false
+        type: string
+        default: 'sit722-w08'
+      image_tag:
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  deploy_frontend:
+    runs-on: ubuntu-latest
+    environment: Production  # Requires manual approval for production deploys
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+      - name: Inject Backend IPs into Frontend (e.g., main.js)
+        run: |
+          # Assuming main.js is in frontend/src/main.js (common for Vue/React); adjust path if needed
+          # Fallback to workflow_call or dispatch inputs
+          PRODUCT_IP="${{ inputs.product_api_ip || github.event.inputs.product_api_ip }}"
+          ORDER_IP="${{ inputs.order_api_ip || github.event.inputs.order_api_ip }}"
+          sed -i "s|_PRODUCT_API_URL_|${PRODUCT_IP}|g" frontend/src/main.js
+          sed -i "s|_ORDER_API_URL_|${ORDER_IP}|g" frontend/src/main.js
+          echo "--- Modified main.js content ---"
+          cat frontend/src/main.js
+          echo "---------------------------------"
+
+      - name: Set up Node.js and Build Frontend (for Docker context)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+        working-directory: ./frontend
+        run: |
+          npm ci  # Clean install with cache
+          npm run build || echo "Build skipped if no script defined in package.json"
+
+      - name: Build and Push Frontend Image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag || github.event.inputs.image_tag || format('{0}-{1}', github.sha, github.run_id) }}
+          REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+        run: |
+          docker build -t ${REGISTRY_LOGIN_SERVER}/frontend:${IMAGE_TAG} ./frontend/
+          docker push ${REGISTRY_LOGIN_SERVER}/frontend:${IMAGE_TAG}
+
+      - name: Set Kubernetes context (get AKS credentials)
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ inputs.aks_resource_group || github.event.inputs.aks_resource_group }}
+          cluster-name: ${{ inputs.aks_cluster_name || github.event.inputs.aks_cluster_name }}
+          use-cluster-admin: true  # For deployment permissions
+
+      - name: Ensure namespace and image pull secret
+        env:
+          REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          NAMESPACE: ${{ inputs.namespace || github.event.inputs.namespace }}
+        run: |
+          set -euo pipefail
+          kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret docker-registry acr-pull \
+            --docker-server="$REGISTRY_LOGIN_SERVER" \
+            --docker-username="$REGISTRY_USERNAME" \
+            --docker-password="$REGISTRY_PASSWORD" \
+            -n $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+          kubectl patch sa default -n $NAMESPACE --type merge -p '{"imagePullSecrets":[{"name":"acr-pull"}]}' || true
+
+      - name: Deploy Frontend to AKS
+        env:
+          REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          IMAGE_TAG: ${{ inputs.image_tag || github.event.inputs.image_tag || format('{0}-{1}', github.sha, github.run_id) }}
+          NAMESPACE: ${{ inputs.namespace || github.event.inputs.namespace }}
+        run: |
+          echo "Deploying frontend with tag $IMAGE_TAG to namespace $NAMESPACE"
+          # Use envsubst to substitute variables in your k8s/frontend.yaml file
+          # Example content for k8s/frontend.yaml (create this file in your repo if it doesn't exist):
+          # apiVersion: apps/v1
+          # kind: Deployment
+          # metadata:
+          #   name: frontend
+          #   namespace: $NAMESPACE
+          # spec:
+          #   replicas: 1
+          #   selector:
+          #     matchLabels:
+          #       app: frontend
+          #   template:
+          #     metadata:
+          #       labels:
+          #         app: frontend
+          #     spec:
+          #       imagePullSecrets:
+          #         - name: acr-pull
+          #       containers:
+          #       - name: frontend
+          #         image: $REGISTRY_LOGIN_SERVER/frontend:$IMAGE_TAG
+          #         imagePullPolicy: Always
+          #         ports:
+          #         - containerPort: 80  # Assuming frontend serves on 80
+          # ---
+          # apiVersion: v1
+          # kind: Service
+          # metadata:
+          #   name: frontend-svc
+          #   namespace: $NAMESPACE
+          # spec:
+          #   type: LoadBalancer
+          #   selector:
+          #     app: frontend
+          #   ports:
+          #   - port: 80
+          #     targetPort: 80
+          envsubst < k8s/frontend.yaml | kubectl apply -f -
+
+      - name: Verify rollout and get external IP
+        env:
+          NAMESPACE: ${{ inputs.namespace || github.event.inputs.namespace }}
+        run: |
+          kubectl rollout status deployment/frontend -n $NAMESPACE --timeout=300s
+          echo "Frontend External IP:"
+          kubectl get svc frontend-svc -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "Pending..."
+
+      - name: Logout from Azure
+        if: always()
+        run: az logout

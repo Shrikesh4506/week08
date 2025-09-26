@@ -1,0 +1,159 @@
+﻿name: CD - Deploy Backend Services to AKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      aks_cluster_name:
+        description: Name of the AKS Cluster
+        required: true
+        default: '<aks_name>'
+      aks_resource_group:
+        description: Resource Group of the AKS Cluster
+        required: true
+        default: '<resource_group_name>'
+      namespace:
+        description: Kubernetes Namespace
+        required: false
+        default: 'sit722-w08'
+      image_tag:
+        description: Image Tag (defaults to latest Git-based tag)
+        required: false
+        default: ''  # Empty means use dynamic from CI
+
+jobs:
+  deploy_backend:
+    runs-on: ubuntu-latest
+    environment: Production  # Requires approval for prod deploys
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure CLI login (service principal)
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          az cloud set -n AzureCloud
+          az login --service-principal -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID"
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+
+      - name: Set Kubernetes context (get AKS credentials)
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ github.event.inputs.aks_resource_group }}
+          cluster-name: ${{ github.event.inputs.aks_cluster_name }}
+          use-cluster-admin: true  # For initial setup
+
+      - name: Ensure namespace and image pull secret
+        env:
+          REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          kubectl create namespace ${{ github.event.inputs.namespace }} --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret docker-registry acr-pull \
+            --docker-server="$REGISTRY_LOGIN_SERVER" \
+            --docker-username="$REGISTRY_USERNAME" \
+            --docker-password="$REGISTRY_PASSWORD" \
+            -n ${{ github.event.inputs.namespace }} --dry-run=client -o yaml | kubectl apply -f -
+          kubectl patch sa default -n ${{ github.event.inputs.namespace }} --type merge -p '{"imagePullSecrets":[{"name":"acr-pull"}]}' || true
+
+      - name: Deploy backend services (product & order)
+        env:
+          REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          IMAGE_TAG: ${{ github.event.inputs.image_tag || format('{0}-{1}', github.sha, github.run_id) }}  # Fallback to dynamic tag
+          NAMESPACE: ${{ github.event.inputs.namespace }}
+        run: |
+          TAG=${IMAGE_TAG:-latest}  # Use provided or latest
+          cat <<YAML | envsubst | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: product-service
+            namespace: $NAMESPACE
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: product
+            template:
+              metadata:
+                labels:
+                  app: product
+              spec:
+                imagePullSecrets:
+                  - name: acr-pull
+                containers:
+                - name: product
+                  image: $REGISTRY_LOGIN_SERVER/product_service:$TAG
+                  imagePullPolicy: Always
+                  ports:
+                  - containerPort: 8000
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: product-svc
+            namespace: $NAMESPACE
+          spec:
+            type: LoadBalancer
+            selector:
+              app: product
+            ports:
+            - port: 8000
+              targetPort: 8000
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: order-service
+            namespace: $NAMESPACE
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: order
+            template:
+              metadata:
+                labels:
+                  app: order
+              spec:
+                imagePullSecrets:
+                  - name: acr-pull
+                containers:
+                - name: order
+                  image: $REGISTRY_LOGIN_SERVER/order_service:$TAG
+                  imagePullPolicy: Always
+                  ports:
+                  - containerPort: 8002
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: order-svc
+            namespace: $NAMESPACE
+          spec:
+            type: LoadBalancer
+            selector:
+              app: order
+            ports:
+            - port: 8002
+              targetPort: 8002
+          YAML
+
+      - name: Verify rollout and get external IPs
+        run: |
+          kubectl rollout status deployment/product-service -n ${{ github.event.inputs.namespace }} --timeout=300s
+          kubectl rollout status deployment/order-service -n ${{ github.event.inputs.namespace }} --timeout=300s
+          echo "Product Service External IP:"
+          kubectl get svc product-svc -n ${{ github.event.inputs.namespace }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "Pending..."
+          echo "Order Service External IP:"
+          kubectl get svc order-svc -n ${{ github.event.inputs.namespace }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "Pending..."
+
+      - name: Logout from Azure
+        if: always()
+        run: az logout
