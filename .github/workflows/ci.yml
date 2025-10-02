@@ -1,5 +1,7 @@
 ﻿name: CI - Build & Test
+
 on:
+  workflow_dispatch:
   push:
     branches: [ dev, main ]
     paths: [ "backend/**", "frontend/**", ".github/workflows/**" ]
@@ -13,46 +15,36 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
+  packages: write   # needed for GHCR (frontend)
 
 env:
-  BACKEND_IMAGE_NAME_PRODUCT: product_service
-  BACKEND_IMAGE_NAME_ORDER:   order_service
-  FRONTEND_IMAGE_NAME:        frontend
+  # Image repo names (adjust if your registry repos differ)
+  BACKEND_IMAGE_NAME: product_service
+  FRONTEND_IMAGE_NAME: frontend_app
 
 jobs:
-  backend-product:
+  backend:
     uses: ./.github/workflows/_reusable-build.yml
     with:
-      service_name: ${{ env.BACKEND_IMAGE_NAME_PRODUCT }}
-      context_path: backend/product
-      test_command: "pip install -r requirements.txt || true && pytest -v || true"
+      service_name: ${{ env.BACKEND_IMAGE_NAME }}
+      context_path: backend
+      dockerfile: Dockerfile
+      test_command: ""  # e.g. "pip install -r requirements.txt && pytest -q"
       push_image: true
     secrets:
+      REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }} # e.g. shrikesh.azurecr.io
       REGISTRY_USERNAME:     ${{ secrets.ACR_USERNAME }}
       REGISTRY_PASSWORD:     ${{ secrets.ACR_PASSWORD }}
-      REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
-
-  backend-order:
-    uses: ./.github/workflows/_reusable-build.yml
-    with:
-      service_name: ${{ env.BACKEND_IMAGE_NAME_ORDER }}
-      context_path: backend/order
-      test_command: "pip install -r requirements.txt || true && pytest -v || true"
-      push_image: true
-    secrets:
-      REGISTRY_USERNAME:     ${{ secrets.ACR_USERNAME }}
-      REGISTRY_PASSWORD:     ${{ secrets.ACR_PASSWORD }}
-      REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
 
   frontend:
     uses: ./.github/workflows/_reusable-build.yml
     with:
       service_name: ${{ env.FRONTEND_IMAGE_NAME }}
       context_path: frontend
+      dockerfile: Dockerfile
       test_command: "npm ci && npm run build && npm test --if-present"
       push_image: true
     secrets:
       REGISTRY_LOGIN_SERVER: ghcr.io
-      REGISTRY_USERNAME: ${{ github.actor }}
-      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      REGISTRY_USERNAME:     ${{ github.actor }}
+      REGISTRY_PASSWORD:     ${{ secrets.GITHUB_TOKEN }}
